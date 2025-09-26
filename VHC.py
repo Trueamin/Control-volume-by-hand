@@ -1,131 +1,98 @@
-import cv2
-import time
-import numpy as np
-import math
-
-import HandTrackingModule as htm 
-
-from ctypes import cast, POINTER
+# کتابخانه‌های مورد نیاز
+import cv2  # پردازش تصویر و کار با وبکم
+import time  # محاسبه فریم بر ثانیه
+import numpy as np  # محاسبات عددی
+import HandTrackingModule as htm  # ماژول تشخیص دست
+import math  # محاسبات ریاضی
+from ctypes import cast, POINTER  # کنترل صدا در ویندوز
 from comtypes import CLSCTX_ALL
-from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume  # کنترل صدا
 
+# تنظیمات ابعاد تصویر
+wCam, hCam = 640, 480  # عرض و ارتفاع تصویر
 
-class VolumeController:
+# تنظیمات دوربین
+cap = cv2.VideoCapture(0)  # اتصال به وبکم پیش‌فرض
+cap.set(3, wCam)  # تنظیم عرض تصویر
+cap.set(4, hCam)  # تنظیم ارتفاع تصویر
+pTime = 0  # زمان قبلی برای محاسبه FPS
+
+# ایجاد شیء تشخیص دست با دقت بالا
+detector = htm.handDetector(detectionCon=1)
+
+# بخش کنترل صدا در ویندوز
+devices = AudioUtilities.GetSpeakers()  # دریافت دستگاه خروجی صدا
+interface = devices.Activate(          # ایجاد رابط کنترل صدا
+    IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+volume = cast(interface, POINTER(IAudioEndpointVolume))  # تبدیل به شیء قابل استفاده
+volRange = volume.GetVolumeRange()  # دریافت محدوده صدا (معمولاً [-65, 0])
+minVol = volRange[0]  # حداقل حجم صدا
+maxVol = volRange[1]  # حداکثر حجم صدا
+vol = 0  # مقدار فعلی صدا
+volBar = 400  # موقعیت اولیه نوار صدا
+volPer = 0  # درصد صدا
+
+# حلقه اصلی برنامه
+while True:
+    success, img = cap.read()  # دریافت فریم از دوربین
+    if not success:  # اگر دریافت فریم ناموفق بود
+        break  # خروج از حلقه
     
-    def __init__(self, wCam=640, hCam=480, camIndex=0, detectionCon=1):
-        self.wCam = wCam
-        self.hCam = hCam
-        self.camIndex = camIndex
-        self.pTime = 0
-        self.detector = htm.handDetector(detectionCon=detectionCon)
-        self.cap = None
-
-        self._setup_volume_control()
-        
-        self.volBar = 400
-        self.volPer = 0
-
-    def _setup_volume_control(self):
-        try:
-            devices = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(
-                IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            self.volume = cast(interface, POINTER(IAudioEndpointVolume))
-            volRange = self.volume.GetVolumeRange()
-            self.minVol = volRange[0]
-            self.maxVol = volRange[1]
-            print(f"Volume Range: {self.minVol} to {self.maxVol}")
-        except Exception as e:
-            print(f"Error setting up PyCAW: {e}")
-            self.volume = None
-            self.minVol = -65.0
-            self.maxVol = 0.0
-
+    # تشخیص دست در تصویر
+    img = detector.findHands(img)
+    # دریافت موقعیت نقاط دست (بدون رسم)
+    lmList, _ = detector.findPosition(img, draw=False)
     
-    def __enter__(self):
-        self.cap = cv2.VideoCapture(self.camIndex)
-        if not self.cap.isOpened():
-            raise IOError(f"Cannot open camera with index {self.camIndex}")
+    # اگر دست تشخیص داده شد
+    if len(lmList) != 0:
+        # بررسی وجود نقاط کلیدی (نوک انگشتان)
+        if len(lmList) > 8:  # نیاز به حداقل 9 نقطه داریم
+            # مختصات نوک انگشت شست (نقطه 4) و انگشت اشاره (نقطه 8)
+            x1, y1 = lmList[4][1], lmList[4][2]
+            x2, y2 = lmList[8][1], lmList[8][2]
+            # محاسبه نقطه میانی
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+            # رسم نقاط و خط بین انگشتان
+            cv2.circle(img, (x1, y1), 15, (255, 0, 255), cv2.FILLED)  # شست
+            cv2.circle(img, (x2, y2), 15, (255, 0, 255), cv2.FILLED)  # اشاره
+            cv2.line(img, (x1, y1), (x2, y2), (255, 0, 255), 3)  # خط اتصال
+            cv2.circle(img, (cx, cy), 15, (255, 0, 255), cv2.FILLED)  # نقطه میانی
+
+            # محاسبه فاصله بین دو انگشت
+            length = math.hypot(x2 - x1, y2 - y1)
             
-        self.cap.set(3, self.wCam)
-        self.cap.set(4, self.hCam)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.cap:
-            self.cap.release()
-        cv2.destroyAllWindows()
-        return False
-
-    
-    def _draw_volume_bar(self, img):
-        cv2.rectangle(img, (50, 150), (85, 400), (255, 0, 0), 3)
-        cv2.rectangle(img, (50, int(self.volBar)), (85, 400), (255, 0, 0), cv2.FILLED)
-        cv2.putText(img, f'{int(self.volPer)} %', (40, 450), cv2.FONT_HERSHEY_COMPLEX,
-                    1, (255, 0, 0), 3)
-        return img
-
-    def _update_fps(self, img):
-        cTime = time.time()
-        time_diff = cTime - self.pTime
-        fps = 1 / time_diff if time_diff > 0 else 0
-        self.pTime = cTime
-        
-        cv2.putText(img, f'FPS: {int(fps)}', (40, 50), cv2.FONT_HERSHEY_COMPLEX,
-                    1, (255, 0, 0), 3)
-        return img
-
-    def run(self):
-        while True:
-            success, img = self.cap.read()
-            if not success:
-                print("Failed to read frame.")
-                break
-                
-            img = self.detector.findHands(img)
-            lmList, _ = self.detector.findPosition(img, draw=False)
+            # تبدیل فاصله به محدوده صدا
+            # محدوده دست: 50-300 پیکسل → محدوده صدا: minVol تا maxVol
+            vol = np.interp(length, [50, 300], [minVol, maxVol])
+            volBar = np.interp(length, [50, 300], [400, 150])  # برای نمایش بصری
+            volPer = np.interp(length, [50, 300], [0, 100])  # درصد صدا
             
-            if len(lmList) > 8:
-                x1, y1 = lmList[4][1], lmList[4][2]
-                x2, y2 = lmList[8][1], lmList[8][2]
-                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            # تنظیم صدا فقط در صورت تغییر محسوس (برای بهینه‌سازی)
+            if abs(volume.GetMasterVolumeLevel() - vol) > 1:
+                volume.SetMasterVolumeLevel(vol, None)
 
-                length = math.hypot(x2 - x1, y2 - y1)
-                
-                vol = np.interp(length, [50, 300], [self.minVol, self.maxVol])
-                self.volBar = np.interp(length, [50, 300], [400, 150])
-                self.volPer = np.interp(length, [50, 300], [0, 100])
-                
-                if self.volume and abs(self.volume.GetMasterVolumeLevel() - vol) > 1:
-                    self.volume.SetMasterVolumeLevel(vol, None)
+            # تغییر رنگ نقطه میانی وقتی فاصله کم است (حالت بسته)
+            if length < 50:
+                cv2.circle(img, (cx, cy), 15, (0, 255, 0), cv2.FILLED)
 
-                cv2.circle(img, (x1, y1), 15, (255, 0, 255), cv2.FILLED)
-                cv2.circle(img, (x2, y2), 15, (255, 0, 255), cv2.FILLED)
-                cv2.line(img, (x1, y1), (x2, y2), (255, 0, 255), 3)
-                
-                color = (255, 0, 255)
-                if length < 50:
-                    color = (0, 255, 0)
-                cv2.circle(img, (cx, cy), 15, color, cv2.FILLED)
+    # رسم نوار حجم صدا
+    cv2.rectangle(img, (50, 150), (85, 400), (255, 0, 0), 3)  # قاب نوار
+    cv2.rectangle(img, (50, int(volBar)), (85, 400), (255, 0, 0), cv2.FILLED)  # سطح صدا
+    cv2.putText(img, f'{int(volPer)} %', (40, 450), cv2.FONT_HERSHEY_COMPLEX,
+                1, (255, 0, 0), 3)  # نمایش درصد صدا
 
-            img = self._draw_volume_bar(img)
-            img = self._update_fps(img)
+    # محاسبه و نمایش FPS
+    cTime = time.time()
+    fps = 1 / (cTime - pTime)
+    pTime = cTime
+    cv2.putText(img, f'FPS: {int(fps)}', (40, 50), cv2.FONT_HERSHEY_COMPLEX,
+                1, (255, 0, 0), 3)
 
-            cv2.imshow("Volume Controller", img)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+    cv2.imshow("Img", img)  # نمایش تصویر
+    if cv2.waitKey(1) & 0xFF == ord('q'):  # خروج با فشار کلید q
+        break
 
-
-def main():
-    try:
-        with VolumeController(wCam=640, hCam=480, detectionCon=0.85) as controller:
-            controller.run()
-            
-    except IOError as e:
-        print(f"System Error: {e}")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-
-
-if __name__ == "__main__":
-    main()
+# آزادسازی منابع
+cap.release()  # آزاد کردن دوربین
+cv2.destroyAllWindows()  # بستن تمام پنجره‌ها
